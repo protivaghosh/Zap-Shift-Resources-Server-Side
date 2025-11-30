@@ -3,13 +3,13 @@ const cors = require('cors')
 const app = express()
 require('dotenv').config()
 const port = process.env.PORT || 3000;
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const stripe = require('stripe')(process.env.Stripe_Secret);
 
 // middleware
 app.use(express.json());
 app.use(cors());
-// zap-shift-resources
-// I3RzYCLl0tI3gz94
+
 
 const uri = `mongodb+srv://${process.env.DB_user}:${process.env.DB_Password}@cluster0.1wh8t.mongodb.net/?appName=Cluster0`;
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -42,6 +42,13 @@ async function run() {
     res.send(result)
 
   });
+
+  app.get('/parcels/:id', async(req, res)=>{
+    const id = req.params.id;
+    const query = {_id: new ObjectId(id)};
+    const result = await parcelsCollection.findOne(query);
+    res.send(result);
+  })
  
   app.post('/parcels', async(req, res)=>{
    const data = req.body
@@ -50,6 +57,45 @@ async function run() {
 
    const result = await parcelsCollection.insertOne(data);
    res.send(result);
+  })
+
+  app.delete('/parcels/:id', async(req, res)=>{
+      const id = req.params.id
+      const query = {_id: new ObjectId(id)};
+      const result = await parcelsCollection.deleteOne(query);
+      res.send(result);
+  })
+
+  // payment related api
+  app.post('/create-checkout-session', async(req, res)=>{
+    const paymentInfo = req.body;
+    const amount = parseInt(paymentInfo.cost)*100;
+     const session = await stripe.checkout.sessions.create({
+    line_items: [
+      {
+        // Provide the exact Price ID (for example, price_1234) of the product you want to sell
+        price_data: {
+          currency : 'USD',
+          unit_amount : amount,
+          product_data : {
+            name : paymentInfo.parcelName
+          }
+        },
+        
+        quantity: 1,
+      },
+    ],
+    customer_email: paymentInfo.senderEmail,
+    mode: 'payment',
+    metadata : {
+      parcelId : paymentInfo.parcelId
+    },
+    success_url: `${process.env.Site_Domain}/dashboard/payment-success`,
+    cancel_url: `${process.env.Site_Domain}/dashboard/payment-cancel`,
+  });
+
+  console.log(session);
+  res.send({url : session.url})
   })
 
 
