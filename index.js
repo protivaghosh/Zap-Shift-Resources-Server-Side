@@ -90,13 +90,34 @@ async function run() {
     metadata : {
       parcelId : paymentInfo.parcelId
     },
-    success_url: `${process.env.Site_Domain}/dashboard/payment-success`,
+    success_url: `${process.env.Site_Domain}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${process.env.Site_Domain}/dashboard/payment-cancel`,
   });
 
   console.log(session);
   res.send({url : session.url})
   })
+
+    app.patch('/payment-success',  async(req, res)=>{
+      const sessionId = req.query.session_id;
+     const session = await stripe.checkout.sessions.retrieve(sessionId);
+     console.log('session retrieve', session);
+     if(session. payment_status === 'paid'){
+      const id = session.metadata.parcelId;
+      const query = { _id: new ObjectId(id) }
+      const update = {
+            $set : {
+                paymentStatus : 'paid',
+            }
+      }
+      const result = await parcelsCollection.updateOne(query, update);
+      res.send(result) ;
+
+     }
+
+      res.send({success:false})
+
+    })   
 
 
     // Send a ping to confirm a successful connection
