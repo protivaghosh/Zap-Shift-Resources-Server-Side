@@ -27,7 +27,8 @@ app.use(cors());
 
 const admin = require("firebase-admin");
 
-const serviceAccount = require("./zap-shift-resources-firebase-adminsdk-fbsvc-0a75b5439c.json");
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -67,7 +68,10 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    if (!client.topology?.isConnected()) {
+  await client.connect();
+}
+
 
    const db = client.db('zap-shift-resources');
    const userCollection = db.collection('users');
@@ -75,8 +79,42 @@ async function run() {
    const paymentCollection = db.collection('payments');
    const ridersCollection = db.collection('riders');
 
+       // middle admin before allowing admin activity
+        // must be used after verifyFBToken middleware
+        const verifyAdmin = async (req, res, next) => {
+            const email = req.decoded_email;
+            const query = { email };
+            const user = await userCollection.findOne(query);
+
+            if (!user || user.role !== 'admin') {
+                return res.status(403).send({ message: 'forbidden access' });
+            }
+
+            next();
+        }
 
   //  user related api
+     app.get('/users', verifyFBToken, async (req, res) => {
+            const searchText = req.query.searchText;
+            const query = {};
+
+            if (searchText) {
+                // query.displayName = {$regex: searchText, $options: 'i'}
+
+                query.$or = [
+                    { displayName: { $regex: searchText, $options: 'i' } },
+                    { email: { $regex: searchText, $options: 'i' } },
+                ]
+
+            }
+
+            const cursor = userCollection.find(query).sort({ createdAt: -1 }).limit(5);
+            const result = await cursor.toArray();
+            res.send(result);
+        });
+
+
+
   app.post('/user', async(req, res)=>{
     const user = req.body;
     user.role = 'user'
@@ -90,13 +128,44 @@ async function run() {
     res.send(result);
   })
 
+   app.get('/users/:id', async (req, res) => {
+
+        })
+
+        app.get('/users/:email/role', async (req, res) => {
+            const email = req.params.email;
+            const query = { email }
+            const user = await userCollection.findOne(query);
+            res.send({ role: user?.role || 'user' })
+        })
+
+
+     app.patch('/users/:id/role', verifyFBToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const roleInfo = req.body;
+            const query = { _id: new ObjectId(id) }
+            const updatedDoc = {
+                $set: {
+                    role: roleInfo.role
+                }
+            }
+            const result = await userCollection.updateOne(query, updatedDoc)
+            res.send(result);
+        })
+
+
   //  parcel api
   app.get('/parcels', async(req, res)=>{
     const query = {}
-    const {email} = req.query;
+    const {email, deliveryStatus } = req.query;
     if(email){
       query.senderEmail = email
     }
+
+     if (deliveryStatus) {
+                query.deliveryStatus = deliveryStatus
+            }
+
     const option = {sort : {createdAt: -1}}
     const cursor = parcelsCollection.find(query, option);
     const result = await cursor.toArray()
@@ -119,6 +188,37 @@ async function run() {
    const result = await parcelsCollection.insertOne(data);
    res.send(result);
   })
+
+
+   app.patch('/parcels/:id', async (req, res) => {
+            const { riderId, riderName, riderEmail } = req.body;
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) }
+
+            const updatedDoc = {
+                $set: {
+                    deliveryStatus: 'driver_assigned',
+                    riderId: riderId,
+                    riderName: riderName,
+                    riderEmail: riderEmail
+                }
+            }
+
+            const result = await parcelsCollection.updateOne(query, updatedDoc)
+
+            // update rider information
+            const riderQuery = { _id: new ObjectId(riderId) }
+            const riderUpdatedDoc = {
+                $set: {
+                    workStatus: 'in_delivery'
+                }
+            }
+            const riderResult = await ridersCollection.updateOne(riderQuery, riderUpdatedDoc);
+
+            res.send(riderResult);
+
+        })
+
 
   app.delete('/parcels/:id', async(req, res)=>{
       const id = req.params.id
@@ -185,6 +285,7 @@ async function run() {
       const update = {
             $set : {
                 paymentStatus : 'paid',
+                deliveryStatus : 'pending-pickup',
                  trackingId : trackingId
             }
       }
@@ -241,10 +342,18 @@ async function run() {
 
     // riders related api
   app.get('/riders', async(req, res)=>{
+    const { status, district, workStatus } = req.query;
     const query = {}
-    if(req.query.status){
-      query.status = req.query.status
-    }
+
+           if (status) {
+                query.status = status;
+            }
+            if (district) {
+                query.district = district
+            }
+            if (workStatus) {
+                query.workStatus = workStatus
+            }
     const cursor = ridersCollection.find(query);
     const result =  await cursor.toArray();
     res.send(result);
@@ -261,13 +370,14 @@ async function run() {
     })
 
 
-     app.patch('/riders/:id', verifyFBToken, async (req, res) => {
+     app.patch('/riders/:id', verifyFBToken, verifyAdmin, async (req, res) => {
             const status = req.body.status;
             const id = req.params.id;
             const query = { _id: new ObjectId(id) }
             const updatedDoc = {
                 $set: {
-                    status: status
+                    status: status,
+                    workStatus: 'available'
                 }
             }
 
@@ -290,8 +400,8 @@ async function run() {
 
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
@@ -304,7 +414,10 @@ app.get('/', (req, res) => {
   res.send('zap shift resource running ...')
 })
 
+module.exports = app;
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`)
-})
+
+
+// app.listen(port, () => {
+//   console.log(`Example app listening on port ${port}`)
+// })
